@@ -4,119 +4,45 @@ VPN Server with AES-GCM Encryption
 Receives encrypted packets from client, decrypts, forwards to internet via NAT.
 """
 
-import pytun
-import subprocess
 import socket
 import threading
-import os
-from dotenv import load_dotenv
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import secrets
 
-# Load environment variables
-load_dotenv()
-
-def parse_packet_info(packet):
-    """Extract source IP, dest IP, and protocol from IP packet."""
-    if len(packet) < 20:
-        return "Invalid packet (too short)"
-    
-    version = packet[0] >> 4
-    if version != 4:
-        return f"IPv{version} packet"
-    
-    protocol = packet[9]
-    protocol_names = {1: "ICMP", 6: "TCP", 17: "UDP"}
-    proto_name = protocol_names.get(protocol, f"Proto-{protocol}")
-    
-    src_ip = ".".join(str(b) for b in packet[12:16])
-    dst_ip = ".".join(str(b) for b in packet[16:20])
-    
-    return f"{proto_name:6} {src_ip:15} → {dst_ip:15}"
+# VPN modules
+from vpn_crypto import VPNCrypto
+from vpn_packet import parse_packet_info, is_ipv4_packet
+from vpn_config import ServerConfig
+from vpn_network import TunInterface, NetworkSetup
 
 class VPNServer:
-    def __init__(self, host='0.0.0.0', port=None, encryption_key=None):
-        self.host = host
-        self.port = port or int(os.getenv('SERVER_PORT', 8888))
-        self.tun_ip = os.getenv('SERVER_TUN_IP', '10.8.0.1')
-        self.vpn_subnet = os.getenv('VPN_SUBNET', '10.8.0.0/24')
+    def __init__(self, encryption_key=None):
+        # Load configuration
+        self.config = ServerConfig()
+        
+        # Setup encryption
+        self.crypto = VPNCrypto(key_hex=encryption_key)
+        print(f"🔐 Encryption enabled: AES-256-GCM")
+        
+        # Network components
         self.tun = None
         self.sock = None
         self.client_addr = None
-        
-        # Encryption setup
-        key_hex = encryption_key or os.getenv('ENCRYPTION_KEY')
-        if not key_hex or key_hex == 'changeme_generate_a_real_key_with_command_above':
-            raise ValueError("ENCRYPTION_KEY not set in .env! Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\"")
-        
-        key_bytes = bytes.fromhex(key_hex)
-        if len(key_bytes) != 32:
-            raise ValueError(f"Encryption key must be 32 bytes (64 hex chars), got {len(key_bytes)} bytes")
-        
-        self.cipher = AESGCM(key_bytes)
-        print(f"🔐 Encryption enabled: AES-256-GCM")
-        
-    def encrypt_packet(self, plaintext):
-        """Encrypt packet with AES-GCM. Returns nonce + ciphertext + tag."""
-        nonce = secrets.token_bytes(12)  # 96-bit nonce for GCM
-        ciphertext = self.cipher.encrypt(nonce, plaintext, None)
-        return nonce + ciphertext  # nonce (12 bytes) + ciphertext + tag (16 bytes)
-    
-    def decrypt_packet(self, encrypted_data):
-        """Decrypt packet. Expects nonce + ciphertext + tag."""
-        if len(encrypted_data) < 12:
-            raise ValueError("Encrypted data too short")
-        
-        nonce = encrypted_data[:12]
-        ciphertext = encrypted_data[12:]
-        plaintext = self.cipher.decrypt(nonce, ciphertext, None)
-        return plaintext
         
     def setup_tun(self):
         """Create and configure TUN interface on server."""
         print("⚙️  Setting up TUN interface...")
         
-        self.tun = pytun.TunTapDevice(name='tun0', flags=pytun.IFF_TUN | pytun.IFF_NO_PI)
+        tun_interface = TunInterface('tun0', self.config.tun_ip)
+        self.tun = tun_interface.create()
         
-        subprocess.run(
-            ["ip", "addr", "add", f"{self.tun_ip}/24", "dev", self.tun.name],
-            check=True, capture_output=True
-        )
-        
-        self.tun.up()
-        subprocess.run(
-            ["ip", "link", "set", self.tun.name, "up"],
-            check=True, capture_output=True
-        )
-        
-        subprocess.run(
-            ["sysctl", "-w", f"net.ipv6.conf.{self.tun.name}.disable_ipv6=1"],
-            check=True, capture_output=True
-        )
-        
-        print(f"  ✓ TUN interface: {self.tun_ip}/24")
+        print(f"  ✓ TUN interface: {self.config.tun_ip}/24")
         
         # Enable IP forwarding
-        subprocess.run(
-            ["sysctl", "-w", "net.ipv4.ip_forward=1"],
-            check=True, capture_output=True
-        )
+        NetworkSetup.enable_ip_forwarding()
         print(f"  ✓ IP forwarding enabled")
         
         # Setup NAT
-        try:
-            subprocess.run(
-                ["iptables", "-t", "nat", "-D", "POSTROUTING", "-s", self.vpn_subnet, "-j", "MASQUERADE"],
-                capture_output=True
-            )
-        except:
-            pass
-        
-        subprocess.run(
-            ["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", self.vpn_subnet, "-j", "MASQUERADE"],
-            check=True, capture_output=True
-        )
-        print(f"  ✓ NAT configured (MASQUERADE)")
+        output_iface = NetworkSetup.setup_nat(self.config.vpn_subnet)
+        print(f"  ✓ NAT configured (MASQUERADE via {output_iface})")
         
     def tun_to_client(self):
         """
@@ -131,13 +57,12 @@ class VPNServer:
                 packet = self.tun.read(self.tun.mtu)
                 
                 # Filter IPv4 only
-                version = packet[0] >> 4 if len(packet) > 0 else 0
-                if version != 4:
+                if not is_ipv4_packet(packet):
                     continue
                 
                 if self.client_addr:
                     # Encrypt packet
-                    encrypted = self.encrypt_packet(packet)
+                    encrypted = self.crypto.encrypt(packet)
                     
                     # Send encrypted packet to client
                     self.sock.sendto(encrypted, self.client_addr)
@@ -167,11 +92,10 @@ class VPNServer:
                 
                 try:
                     # Decrypt packet
-                    packet = self.decrypt_packet(encrypted_data)
+                    packet = self.crypto.decrypt(encrypted_data)
                     
                     # Filter IPv4 only
-                    version = packet[0] >> 4 if len(packet) > 0 else 0
-                    if version != 4:
+                    if not is_ipv4_packet(packet):
                         continue
                     
                     packet_info = parse_packet_info(packet)
@@ -198,9 +122,9 @@ class VPNServer:
         
         # Create UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind((self.host, self.port))
+        self.sock.bind((self.config.host, self.config.port))
         
-        print(f"\n🌐 Server listening on {self.host}:{self.port} (UDP)")
+        print(f"\n🌐 Server listening on {self.config.host}:{self.config.port} (UDP)")
         print(f"   Waiting for client connection...\n")
         print("=" * 60)
         
@@ -226,13 +150,7 @@ class VPNServer:
                 self.tun.close()
             
             # Clean up NAT rule
-            try:
-                subprocess.run(
-                    ["iptables", "-t", "nat", "-D", "POSTROUTING", "-s", self.vpn_subnet, "-j", "MASQUERADE"],
-                    capture_output=True
-                )
-            except:
-                pass
+            NetworkSetup.cleanup_nat(self.config.vpn_subnet)
             
             print("✓ Server shutdown complete")
 
