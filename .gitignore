@@ -1,0 +1,4 @@
+.venv/
+.env
+vpn-pair.pem
+vpn-pair.pem:Zone.Identifier
