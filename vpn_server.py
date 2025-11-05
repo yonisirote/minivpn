@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VPN Server - Clean version for separate machine deployment
-Receives packets from client, forwards to internet via NAT, and returns responses.
+VPN Server with AES-GCM Encryption
+Receives encrypted packets from client, decrypts, forwards to internet via NAT.
 """
 
 import pytun
@@ -10,6 +10,8 @@ import socket
 import threading
 import os
 from dotenv import load_dotenv
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import secrets
 
 # Load environment variables
 load_dotenv()
@@ -33,7 +35,7 @@ def parse_packet_info(packet):
     return f"{proto_name:6} {src_ip:15} → {dst_ip:15}"
 
 class VPNServer:
-    def __init__(self, host='0.0.0.0', port=None):
+    def __init__(self, host='0.0.0.0', port=None, encryption_key=None):
         self.host = host
         self.port = port or int(os.getenv('SERVER_PORT', 8888))
         self.tun_ip = os.getenv('SERVER_TUN_IP', '10.8.0.1')
@@ -41,6 +43,34 @@ class VPNServer:
         self.tun = None
         self.sock = None
         self.client_addr = None
+        
+        # Encryption setup
+        key_hex = encryption_key or os.getenv('ENCRYPTION_KEY')
+        if not key_hex or key_hex == 'changeme_generate_a_real_key_with_command_above':
+            raise ValueError("ENCRYPTION_KEY not set in .env! Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\"")
+        
+        key_bytes = bytes.fromhex(key_hex)
+        if len(key_bytes) != 32:
+            raise ValueError(f"Encryption key must be 32 bytes (64 hex chars), got {len(key_bytes)} bytes")
+        
+        self.cipher = AESGCM(key_bytes)
+        print(f"🔐 Encryption enabled: AES-256-GCM")
+        
+    def encrypt_packet(self, plaintext):
+        """Encrypt packet with AES-GCM. Returns nonce + ciphertext + tag."""
+        nonce = secrets.token_bytes(12)  # 96-bit nonce for GCM
+        ciphertext = self.cipher.encrypt(nonce, plaintext, None)
+        return nonce + ciphertext  # nonce (12 bytes) + ciphertext + tag (16 bytes)
+    
+    def decrypt_packet(self, encrypted_data):
+        """Decrypt packet. Expects nonce + ciphertext + tag."""
+        if len(encrypted_data) < 12:
+            raise ValueError("Encrypted data too short")
+        
+        nonce = encrypted_data[:12]
+        ciphertext = encrypted_data[12:]
+        plaintext = self.cipher.decrypt(nonce, ciphertext, None)
+        return plaintext
         
     def setup_tun(self):
         """Create and configure TUN interface on server."""
@@ -66,17 +96,15 @@ class VPNServer:
         
         print(f"  ✓ TUN interface: {self.tun_ip}/24")
         
-        # Enable IP forwarding (allows server to route packets)
+        # Enable IP forwarding
         subprocess.run(
             ["sysctl", "-w", "net.ipv4.ip_forward=1"],
             check=True, capture_output=True
         )
         print(f"  ✓ IP forwarding enabled")
         
-        # Setup NAT (MASQUERADE) so client traffic can reach internet
-        # This rewrites the source IP of packets from 10.8.0.x to server's public IP
+        # Setup NAT
         try:
-            # Remove rule if it exists
             subprocess.run(
                 ["iptables", "-t", "nat", "-D", "POSTROUTING", "-s", self.vpn_subnet, "-j", "MASQUERADE"],
                 capture_output=True
@@ -92,14 +120,14 @@ class VPNServer:
         
     def tun_to_client(self):
         """
-        Read packets from TUN (responses from internet) and send to client via UDP.
+        Read packets from TUN, encrypt, and send to client via UDP.
         
-        Flow: Internet → Server TUN → UDP → Client
+        Flow: Internet → Server TUN → Encrypt → UDP → Client
         """
         print("📤 TUN → Client thread started")
         try:
             while True:
-                # Read packet from TUN (response packets coming back)
+                # Read packet from TUN
                 packet = self.tun.read(self.tun.mtu)
                 
                 # Filter IPv4 only
@@ -108,41 +136,53 @@ class VPNServer:
                     continue
                 
                 if self.client_addr:
-                    # Send packet back to client via UDP
-                    self.sock.sendto(packet, self.client_addr)
+                    # Encrypt packet
+                    encrypted = self.encrypt_packet(packet)
+                    
+                    # Send encrypted packet to client
+                    self.sock.sendto(encrypted, self.client_addr)
+                    
                     packet_info = parse_packet_info(packet)
-                    print(f"  📤 [TUN→Client] {packet_info} ({len(packet):4} bytes)")
+                    print(f"  📤 [TUN→Client] {packet_info} ({len(packet):4}b → {len(encrypted):4}b encrypted)")
                     
         except Exception as e:
             print(f"  ✗ TUN → Client error: {e}")
     
     def client_to_tun(self):
         """
-        Receive packets from client via UDP and inject into TUN.
+        Receive encrypted packets from client, decrypt, and inject into TUN.
         
-        Flow: Client → UDP → Server TUN → Internet
+        Flow: Client → UDP → Decrypt → Server TUN → Internet
         """
         print("📥 Client → TUN thread started")
         try:
             while True:
-                # Receive packet from client
-                packet, addr = self.sock.recvfrom(65535)
+                # Receive encrypted packet from client
+                encrypted_data, addr = self.sock.recvfrom(65535)
                 
                 # Register client on first packet
                 if not self.client_addr:
                     self.client_addr = addr
                     print(f"\n✅ Client connected: {addr[0]}:{addr[1]}\n")
                 
-                # Filter IPv4 only
-                version = packet[0] >> 4 if len(packet) > 0 else 0
-                if version != 4:
+                try:
+                    # Decrypt packet
+                    packet = self.decrypt_packet(encrypted_data)
+                    
+                    # Filter IPv4 only
+                    version = packet[0] >> 4 if len(packet) > 0 else 0
+                    if version != 4:
+                        continue
+                    
+                    packet_info = parse_packet_info(packet)
+                    print(f"  📥 [Client→TUN] {packet_info} ({len(encrypted_data):4}b → {len(packet):4}b decrypted)")
+                    
+                    # Inject into TUN
+                    self.tun.write(packet)
+                    
+                except Exception as e:
+                    print(f"  ⚠️  Decryption failed: {e}")
                     continue
-                
-                packet_info = parse_packet_info(packet)
-                print(f"  📥 [Client→TUN] {packet_info} ({len(packet):4} bytes)")
-                
-                # Inject into TUN (kernel will route to internet via NAT)
-                self.tun.write(packet)
                 
         except Exception as e:
             print(f"  ✗ Client → TUN error: {e}")
@@ -150,7 +190,7 @@ class VPNServer:
     def start(self):
         """Start the VPN server."""
         print("=" * 60)
-        print("VPN Server - Ready for client connection")
+        print("VPN Server - AES-256-GCM Encrypted")
         print("=" * 60)
         
         # Setup TUN and NAT
