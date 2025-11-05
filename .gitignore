@@ -2,3 +2,10 @@
 .env
 vpn-pair.pem
 vpn-pair.pem:Zone.Identifier
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python

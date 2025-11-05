@@ -1,0 +1,10 @@
+# VPN Dependencies
+
+# Cryptography for AES-256-GCM encryption
+cryptography>=46.0.0
+
+# Python TUN/TAP interface
+python-pytun>=2.4.1
+
+# Environment variable management
+python-dotenv>=1.0.0
