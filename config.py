@@ -5,7 +5,7 @@ VPN Configuration - Handles configuration loading and validation.
 
 import os
 from dotenv import load_dotenv
-from vpn_common import (
+from constants import (
     DEFAULT_SERVER_PORT,
     DEFAULT_SERVER_TUN_IP,
     DEFAULT_CLIENT_TUN_IP,
