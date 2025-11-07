@@ -3,7 +3,7 @@
 VPN Packet Utilities - Packet parsing and manipulation.
 """
 
-from vpn_common import PROTOCOL_NAMES, IP_VERSION_4
+from constants import PROTOCOL_NAMES, IP_VERSION_4
 
 
 def parse_packet_info(packet):

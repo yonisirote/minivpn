@@ -10,10 +10,10 @@ import sys
 import os
 
 # VPN modules
-from vpn_crypto import VPNCrypto
-from vpn_packet import parse_packet_info, is_ipv4_packet
-from vpn_config import ClientConfig
-from vpn_network import TunInterface
+from crypto import VPNCrypto
+from packet import parse_packet_info, is_ipv4_packet
+from config import ClientConfig
+from network import TunInterface
 
 class VPNClient:
     def __init__(self, server_host=None, encryption_key=None):
@@ -28,23 +28,6 @@ class VPNClient:
         # Network components
         self.tun = None
         self.sock = None
-        
-    def setup_tun(self):
-        """Create and configure TUN interface on client."""
-        print("⚙️  Setting up TUN interface...")
-        
-        tun_interface = TunInterface('tun0', self.config.tun_ip)
-        self.tun = tun_interface.create()
-        
-        print(f"  ✓ TUN interface: {self.config.tun_ip}/24")
-        
-    def setup_routing(self):
-        """Setup routes to direct traffic through VPN tunnel."""
-        print("⚙️  Configuring routes...")
-        
-        print(f"  ✓ Server reachable at 10.8.0.1")
-        print(f"  💡 To route specific traffic through VPN:")
-        print(f"     sudo ip route add <destination> via 10.8.0.1 dev tun0")
         
     def tun_to_server(self):
         """
@@ -119,8 +102,10 @@ class VPNClient:
         print("=" * 60)
         
         # Setup TUN interface
-        self.setup_tun()
-        self.setup_routing()
+        print("⚙️  Setting up TUN interface...")
+        tun_interface = TunInterface('tun0', self.config.tun_ip)
+        self.tun = tun_interface.create()
+        print(f"  ✓ TUN interface: {self.config.tun_ip}/24")
         
         # Create UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

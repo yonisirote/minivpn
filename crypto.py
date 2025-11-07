@@ -7,11 +7,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import secrets
 import os
 from dotenv import load_dotenv
-from vpn_common import GCM_NONCE_SIZE, AES_KEY_SIZE
+from constants import GCM_NONCE_SIZE, AES_KEY_SIZE
 
 
 class VPNCrypto:
     """Handles encryption/decryption for VPN packets using AES-256-GCM."""
+    
     
     def __init__(self, key_hex=None):
         """
