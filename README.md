@@ -5,10 +5,26 @@ A learning-focused VPN implementation with AES-256-GCM encryption, built with Py
 ## Features
 
 ✅ **AES-256-GCM Encryption** - Modern authenticated encryption  
-✅ **Multi-client support** - Server handles multiple simultaneous clients  
 ✅ **TUN interface** - Leverages Linux kernel routing  
 ✅ **NAT/Masquerading** - Automatic internet access through VPN  
 ✅ **Detailed logging** - See every packet flow  
+
+---
+
+## How It Works
+
+1. **Client** creates TUN interface (`tun0`) with IP `10.8.0.2`
+2. **Server** creates TUN interface (`tun0`) with IP `10.8.0.1`
+3. **Encryption**: All packets encrypted with AES-256-GCM before sending over UDP
+4. **Routing**: Linux kernel routes packets through TUN interfaces
+5. **NAT**: Server masquerades VPN traffic to internet
+6. **Multi-client**: Server learns client VPN IPs from packet sources
+
+```
+Client App → tun0 → Encrypt → UDP → Server → Decrypt → tun0 → NAT → Internet
+                                                                  ↓
+Client App ← tun0 ← Decrypt ← UDP ← Server ← Encrypt ← tun0 ← Internet
+```
 
 ---
 
@@ -111,15 +127,49 @@ ping 8.8.8.8
 
 ### Option 2: Route ALL Traffic Through VPN
 
-⚠️ **WARNING:** This replaces your default route. Use with caution!
+⚠️ **IMPORTANT:** To prevent routing loops, you MUST add a specific route for the VPN server before setting the default route!
+
+**Step-by-step setup:**
 
 ```bash
-# Route all internet traffic through VPN
-sudo ip route add default via 10.8.0.1 dev tun0 metric 100
+# 1. Save your current default gateway (you'll need this later)
+ip route show default
+# Example output: default via 172.25.192.1 dev eth0
 
-# Test it
+# 2. Add specific route for VPN server through original gateway
+#    Replace <SERVER_IP> with your VPN server's public IP
+#    Replace <GATEWAY> and <INTERFACE> with values from step 1
+sudo ip route add <SERVER_IP>/32 via <GATEWAY> dev <INTERFACE>
+
+# Example:
+sudo ip route add 34.123.45.67/32 via 172.25.192.1 dev eth0
+
+# 3. Now set VPN as default route
+sudo ip route replace default via 10.8.0.1 dev tun0
+
+# 4. Test it
 ping 8.8.8.8
 curl ifconfig.me  # Should show VPN server's public IP
+traceroute google.com  # Should work now
+```
+
+**Why the server exception is needed:**
+- Without it, the VPN's own packets try to route through the VPN tunnel
+- This creates a routing loop that can overwhelm the server
+- The `/32` route ensures VPN traffic uses the original gateway
+
+**To restore normal routing:**
+
+```bash
+# 1. Remove VPN server specific route
+sudo ip route del <SERVER_IP>/32
+
+# 2. Restore original default route
+sudo ip route replace default via <GATEWAY> dev <INTERFACE>
+
+# Example:
+sudo ip route del 34.123.45.67/32
+sudo ip route replace default via 172.25.192.1 dev eth0
 ```
 
 ### Removing Routes
@@ -130,8 +180,7 @@ When done, remove the routes:
 # Remove specific route
 sudo ip route del 8.8.8.8 via 10.8.0.1 dev tun0
 
-# Remove default route through VPN
-sudo ip route del default via 10.8.0.1 dev tun0 metric 100
+# Remove all-traffic VPN routing (see above for detailed steps)
 ```
 
 Or simply stop the VPN client (Ctrl+C), which brings down the TUN interface and removes associated routes automatically.
@@ -196,20 +245,4 @@ The VPN shows detailed packet information:
 ---
 
 
-## How It Works
-
-1. **Client** creates TUN interface (`tun0`) with IP `10.8.0.2`
-2. **Server** creates TUN interface (`tun0`) with IP `10.8.0.1`
-3. **Encryption**: All packets encrypted with AES-256-GCM before sending over UDP
-4. **Routing**: Linux kernel routes packets through TUN interfaces
-5. **NAT**: Server masquerades VPN traffic to internet
-6. **Multi-client**: Server learns client VPN IPs from packet sources
-
-```
-Client App → tun0 → Encrypt → UDP → Server → Decrypt → tun0 → NAT → Internet
-                                                                  ↓
-Client App ← tun0 ← Decrypt ← UDP ← Server ← Encrypt ← tun0 ← Internet
-```
-
----
 
